@@ -55,4 +55,5 @@ experiment:
   episode_mode: random_training_window
   episodes: 300  # Completed five-year episodes per seed; divisible by six workers (50 updates).
   log_interval: 1  # Diagnostic reporting cadence in HAPPO update rounds.
+  eval_interval: 1  # Fixed training-window evaluation at round 0, every N updates, and the final update.
   seeds: [1, 2, 3, 4, 5]

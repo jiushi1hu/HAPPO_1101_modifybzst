@@ -14,7 +14,7 @@ from harl.envs.cascade_reservoir.data_loader import CascadeData, HEAD_MODELS, re
 from harl.envs.cascade_reservoir.episodes import positive_integer
 from harl.envs.cascade_reservoir.reward import reward_settings, validate_discount_factor
 from harl.runners.cascade_reservoir_runner import validate_gae_lambda, validate_seed
-from examples.train_cascade_parallel import run_parallel_experiment, step_metrics_paths
+from examples.train_cascade_parallel import run_parallel_experiment, step_metrics_paths, plot_output_paths
 
 
 def load_configuration():
@@ -30,7 +30,9 @@ def main():
     parser.add_argument('--episodes',type=int,help='Completed multi-year episodes per seed (default: 300)')
     parser.add_argument('--episode-days',type=int,help='Daily decisions per episode (default: 1825)')
     parser.add_argument('--parallel-envs',type=int,help='Independent worker environments (default: 6)')
-    parser.add_argument('--log-interval',type=int,help='Print diagnostics every N updates; no periodic evaluation')
+    parser.add_argument('--log-interval',type=int,help='Print training diagnostics every N updates')
+    parser.add_argument('--eval-interval',type=int,
+                        help='Evaluate fixed training scenarios every N updates (default: 1); also at round 0 and the last update')
     parser.add_argument('--evaluation-years',nargs='+',type=int,metavar='YEAR',
                         help='Exactly five held-out years; the other 55 years are used for training')
     parser.add_argument('--seeds',nargs='+',type=int)
@@ -72,7 +74,7 @@ def main():
         parser.error('episode-log must name a new file')
     config, physical = load_configuration()
     exp, train, model, algo = (config[key] for key in ('experiment','train','model','algo'))
-    for name in ('episodes','log_interval','seeds'):
+    for name in ('episodes','log_interval','seeds','eval_interval'):
         value = getattr(args,name)
         if value is not None:
             exp[name] = value
@@ -109,6 +111,7 @@ def main():
         train['n_rollout_threads'] = positive_integer(train['n_rollout_threads'],'parallel_envs')
         exp['episodes'] = positive_integer(exp['episodes'],'episodes')
         exp['log_interval'] = positive_integer(exp['log_interval'],'log_interval')
+        exp['eval_interval'] = positive_integer(exp.get('eval_interval',1),'eval_interval')
         if exp['episodes'] % train['n_rollout_threads']:
             raise ValueError('episodes must be divisible by parallel_envs')
         if not isinstance(exp['seeds'],(list,tuple)) or not exp['seeds']:
@@ -140,6 +143,10 @@ def main():
     for path in step_metrics_paths(args.episode_log,exp['seeds']).values():
         if path.exists():
             parser.error('Daily metrics file already exists: '+str(path))
+    if not args.no_plot:
+        for path in plot_output_paths(args.episode_log).values():
+            if path.exists():
+                parser.error('Figure file already exists: '+str(path))
     exp['diagnostics'] = args.diagnostics
     data = CascadeData(args.data_dir,physical,exp)
     run_parallel_experiment(data,physical,config,args)

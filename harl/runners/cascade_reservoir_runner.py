@@ -13,6 +13,9 @@ from harl.common.valuenorm import ValueNorm
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer, training_windows
 from harl.envs.cascade_reservoir.parallel_env import ParallelCascadeEnvs
 from harl.envs.cascade_reservoir.evaluation import evaluate_policy
+from harl.envs.cascade_reservoir.periodic_evaluation import (
+    evaluate_periodic_policy, select_periodic_windows)
+from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
 from harl.envs.cascade_reservoir.reward import EpisodeRewardMetrics, reward_settings, validate_discount_factor
 from harl.envs.cascade_reservoir.training_metrics import log_episode, log_step, step_record
 from harl.runners.on_policy_ha_runner import OnPolicyHARunner
@@ -43,7 +46,8 @@ def validate_seed(value):
 class CascadeReservoirRunner(OnPolicyHARunner):
     """Independent reservoir actors, centralized critic, and uninterrupted episodes."""
 
-    def __init__(self, data, physical_config, algo_args, seed, episode_log=None, step_log=None):
+    def __init__(self, data, physical_config, algo_args, seed, episode_log=None, step_log=None,
+                 periodic_windows=None):
         seed = validate_seed(seed)
         self.data, self.physical_config = data, physical_config
         self.requested_args = copy.deepcopy(algo_args)
@@ -68,6 +72,9 @@ class CascadeReservoirRunner(OnPolicyHARunner):
             if self.length*self.n_envs % count:
                 raise ValueError(key+' must divide all collected daily transitions')
         self.windows = training_windows(data, self.length)
+        self.eval_interval = positive_integer(args['experiment'].get('eval_interval', 1), 'eval_interval')
+        self.periodic_windows = copy.deepcopy(
+            select_periodic_windows(data) if periodic_windows is None else periodic_windows)
         self.training_window_starts = tuple(self.windows)
         self.window_rng = np.random.RandomState(seed)
         self.sampled_window_starts = []
@@ -96,6 +103,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
         self.last_rollout = {}
         self.last_reward_metrics = EpisodeRewardMetrics(args['algo']['gamma']).summary()
         self.training_history, self.episode_history, self.diagnostics_history = [], [], []
+        self.periodic_evaluation_history = []
         self.episode_log = episode_log
         self.step_log = step_log
         self.diagnostics_enabled = bool(args['experiment'].get('diagnostics', False))
@@ -246,6 +254,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
             raise RuntimeError('This runner has already collected episodes; model resume is not implemented')
         updates = episodes//self.n_envs
         try:
+            self.periodic_evaluation()
             for k in range(1, updates+1):
                 if self.algo_args['train']['use_linear_lr_decay']:
                     for actor in self.actor:
@@ -302,9 +311,24 @@ class CascadeReservoirRunner(OnPolicyHARunner):
                     print('seed={} update={}/{} episodes={} steps={} return={:.6f} generation={:.3f} TWh'.format(
                         self.seed,k,updates,self.completed_episodes,self.training_steps,
                         self.last_reward_metrics['episode_reward'],self.last_rollout['episode_energy_TWh']),flush=True)
+                if k % self.eval_interval == 0 or k == updates:
+                    self.periodic_evaluation()
             return dict(seed=self.seed, updates_completed=self.update_count, **self.evaluation_policy_metadata())
         finally:
             self.close()
+
+    @torch.no_grad()
+    def periodic_evaluation(self):
+        """Measure this policy on fresh, fixed training scenarios without collection."""
+        if (self.periodic_evaluation_history and
+                self.periodic_evaluation_history[-1]['evaluation_round'] == self.update_count):
+            raise RuntimeError('This policy update has already been evaluated')
+        record = evaluate_periodic_policy(self.actor, self.data, self.physical_config,
+            seed=self.seed, evaluation_round=self.update_count, training_steps=self.training_steps,
+            windows=self.periodic_windows, gamma=self.algo_args['algo']['gamma'])
+        self.periodic_evaluation_history.append(record)
+        log_episode(record, self.episode_log)
+        return record
 
     def evaluation_policy_metadata(self):
         if self.update_count < 1:
@@ -322,6 +346,19 @@ class CascadeReservoirRunner(OnPolicyHARunner):
                     episode=self.completed_episodes,training_steps=self.training_steps,diagnostics=True,
                     gamma=self.algo_args['algo']['gamma'],source_years=years,episode_days=self.length,
                     step_log=self.step_log)
+        except InfeasibleCascade as exc:
+            progress = getattr(exc, 'evaluation_progress', {})
+            log_episode(dict(record_type='final_evaluation_sequence', phase='evaluation',
+                seed=self.seed, episode=self.completed_episodes, training_steps=self.training_steps,
+                evaluation_source_years=years, episode_horizon_days=self.length,
+                status='failed', feasible=False, gamma=self.algo_args['algo']['gamma'],
+                failure=dict(error_type=type(exc).__name__, reason=str(exc),
+                    date=progress.get('date', str(years[0])+'-01-01'),
+                    episode_step=progress.get('episode_step', 1),
+                    completed_steps=progress.get('completed_steps', 0)),
+                partial_metrics=progress.get('partial_metrics', {}),
+                episode_reward=None, energy_MWh=None, energy_TWh=None, **metadata), self.episode_log)
+            raise  # Preserve the existing final-evaluation stop-on-failure behavior.
         finally:
             for actor,mode in zip(self.actor,modes):
                 actor.actor.train(mode)

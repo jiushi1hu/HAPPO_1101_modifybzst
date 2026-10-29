@@ -6,6 +6,8 @@ from pathlib import Path
 import subprocess
 
 from harl.envs.cascade_reservoir.episodes import episode_environment, positive_integer, training_windows
+from harl.envs.cascade_reservoir.periodic_evaluation import (
+    PERIODIC_EVALUATION_DAYS, select_periodic_windows)
 from harl.envs.cascade_reservoir.training_metrics import log_episode, StepMetricsWriter, STEP_METRIC_FIELDS
 from harl.runners.cascade_reservoir_runner import CascadeReservoirRunner
 
@@ -18,6 +20,16 @@ def step_metrics_paths(episode_log, seeds):
         return {}
     path=Path(episode_log)
     return {seed:path.with_name(path.stem+'_seed'+str(seed)+'_steps.csv') for seed in seeds}
+
+
+def plot_output_paths(episode_log):
+    """Derived figure paths are unique to the requested experiment log."""
+    if episode_log is None:
+        return {}
+    path=Path(episode_log)
+    return dict(training=path.with_name(path.stem+'_training.png'),
+                evaluator=path.with_name(path.stem+'_evaluator_return.png'),
+                violations=path.with_name(path.stem+'_violation_rates.png'))
 
 
 def check_episode_inputs(data,physical,years,days,bins):
@@ -34,12 +46,16 @@ def run_parallel_experiment(data,physical,config,args):
     count=positive_integer(config['train']['n_rollout_threads'],'parallel_envs')
     episodes=positive_integer(config['experiment']['episodes'],'episodes')
     interval=positive_integer(config['experiment']['log_interval'],'log_interval')
+    eval_interval=positive_integer(config['experiment'].get('eval_interval',1),'eval_interval')
     if episodes % count:
         raise ValueError('episodes must be divisible by parallel_envs')
     windows=training_windows(data,days)
     bins=config['model']['action_bins']
     daily_paths=step_metrics_paths(args.episode_log,config['experiment']['seeds'])
-    for path in ([] if args.episode_log is None else [args.episode_log])+list(daily_paths.values()):
+    figure_paths={} if args.no_plot else plot_output_paths(args.episode_log)
+    periodic_windows=select_periodic_windows(data)
+    for path in (([] if args.episode_log is None else [args.episode_log])+
+                 list(daily_paths.values())+list(figure_paths.values())):
         if path.exists():
             raise ValueError('Output file already exists: '+str(path))
     evaluation_years=list(data.evaluation_years)
@@ -47,6 +63,8 @@ def run_parallel_experiment(data,physical,config,args):
           ' and the evaluation sequence' if not args.skip_final_evaluation else ''),flush=True)
     for years in list(windows.values())+([] if args.skip_final_evaluation else [evaluation_years]):
         check_episode_inputs(data,physical,years,days,bins)
+    for window in periodic_windows:
+        check_episode_inputs(data,physical,window['source_years'],PERIODIC_EVALUATION_DAYS,bins)
     sources=sorted(list((ROOT/'harl').rglob('*.py'))+list((ROOT/'examples').glob('*.py'))+
                    list((ROOT/'harl/configs').rglob('*.yaml')))
     metadata=dict(record_type='run_configuration',collection_mode='five_year_parallel',
@@ -57,6 +75,16 @@ def run_parallel_experiment(data,physical,config,args):
         evaluation_source_years=evaluation_years,evaluation_year_count=len(evaluation_years),
         evaluation_labels=list(data.evaluation_labels),training_window_starts=list(windows),
         training_window_source_years=windows,policy_source='final_training_update',
+        periodic_evaluation=dict(eval_interval=eval_interval,
+            episode_horizon_days=PERIODIC_EVALUATION_DAYS,windows=periodic_windows,
+            schedule='round 0, every eval_interval completed updates, and the final update',
+            action_selection='deterministic argmax; fresh environments; no training samples',
+            aggregation='arithmetic mean of all three complete windows; null metrics if any window fails',
+            violation_rate_definition='violating active reservoir-days / all active reservoir-days; '
+                'counts pooled over all three complete windows; undiscounted; null if a window fails or no requirement is active',
+            violation_rate_units='fraction (plots display percent)',
+            role='fixed training-only convergence diagnostics; held-out years are reserved for final evaluation'),
+        figure_paths={name:str(path.resolve()) for name,path in figure_paths.items()},
         calendar='fixed consecutive daily steps with leap days retained; storage carries across source-year boundaries',
         release_bounds_scope='current_transition',
         daily_bound_alignment='action_date=t constrains the state after action t; no additional date shift',
@@ -94,7 +122,7 @@ def run_parallel_experiment(data,physical,config,args):
         runners=[]
         for seed in config['experiment']['seeds']:
             runner=CascadeReservoirRunner(data,physical,config,seed,episode_log=stream,
-                                          step_log=daily_writers.get(seed))
+                                          step_log=daily_writers.get(seed),periodic_windows=periodic_windows)
             runner.run(episodes,interval)
             runners.append(runner)
         evaluations=[] if args.skip_final_evaluation else [row for runner in runners for row in runner.final_evaluation()]
@@ -103,13 +131,24 @@ def run_parallel_experiment(data,physical,config,args):
             training_steps_per_seed=[runner.training_steps for runner in runners],
             completed_episodes_per_seed=[runner.completed_episodes for runner in runners],
             updates_per_seed=[runner.update_count for runner in runners],policy_source='final_training_update',
+            periodic_evaluations_per_seed=[len(runner.periodic_evaluation_history) for runner in runners],
+            periodic_evaluation_failures_per_seed=[sum(row['status']=='failed'
+                for row in runner.periodic_evaluation_history) for runner in runners],
             final_policy_metadata=[runner.evaluation_policy_metadata() for runner in runners],
             evaluation_skipped=bool(args.skip_final_evaluation),evaluations=evaluations)
         log_episode(result,stream)
         if not args.no_plot:
             payload=dict(episode_horizon_days=days,gamma=config['algo']['gamma'],
-                seeds=config['experiment']['seeds'],histories=[runner.training_history for runner in runners])
-            subprocess.run([args.plot_python,str(ROOT/'examples/plot_cascade_parallel.py')],
+                seeds=config['experiment']['seeds'],updates_per_seed=episodes//count,
+                periodic_evaluation=dict(windows=periodic_windows),
+                histories=[runner.training_history for runner in runners],
+                evaluation_histories=[runner.periodic_evaluation_history for runner in runners])
+            plot_command=[args.plot_python,str(ROOT/'examples/plot_cascade_parallel.py')]
+            if figure_paths:
+                plot_command.extend(['--output',str(figure_paths['training']),
+                                     '--evaluator-output',str(figure_paths['evaluator']),
+                                     '--violations-output',str(figure_paths['violations'])])
+            subprocess.run(plot_command,
                 input=json.dumps(payload,allow_nan=False),text=True,check=True)
     print('Finished multi-year experiment. Model persistence/resume is not implemented; '
           'JSONL summaries and per-seed daily metrics CSVs are saved with --episode-log.',flush=True)

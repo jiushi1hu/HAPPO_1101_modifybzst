@@ -11,6 +11,7 @@ The environment resolves releases upstream to downstream with zero travel delay.
 - Training years are the full complement; inflow scaling uses training data only.
 - Each episode contains **1,825 daily decisions**, with **six parallel workers**.
 - Each reservoir has **100 discrete actions** by default.
+- Fixed training-only scenarios are evaluated at **Round 0 and after each update**.
 - The final trained policy is evaluated after all training seeds finish.
 
 The standard budget is 300 completed episodes per seed: 50 HAPPO updates and
@@ -24,8 +25,8 @@ Episode counts must be divisible by the number of workers.
 cd /Users/hujingxin/Documents/Code_python/HARL-main
 
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
-  --episodes 300 --seeds 1 2 3 --gamma 1 --diagnostics \
-  --episode-log runs/five_year_key_metrics_seeds123_run1.jsonl \
+  --episodes 300 --seeds 1 2 3 --gamma 1 --eval-interval 1 --diagnostics \
+  --episode-log runs/five_year_periodic_eval_seeds123_run2.jsonl \
   --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
 ```
 
@@ -38,15 +39,25 @@ For console-only execution, replace `--plot-python ...` with `--no-plot`.
 Launch the file-backed entry point above so spawned workers can re-import
 the main module. Model persistence/resume is not implemented; start a fresh
 run to use changed source or settings. Metrics are saved only when an
-`--episode-log` path is supplied; plot windows are not automatically exported.
+`--episode-log` path is supplied. With plotting enabled, all three figures are
+automatically saved beside the log before their windows open:
+
+```text
+runs/five_year_periodic_eval_seeds123_run2_training.png
+runs/five_year_periodic_eval_seeds123_run2_evaluator_return.png
+runs/five_year_periodic_eval_seeds123_run2_violation_rates.png
+```
+
+`--no-plot` skips automatic figure creation and display; saved logs can still
+be plotted or exported afterward.
 
 `--episode-log` writes run, episode and update summaries to JSONL, and compact
 daily metrics to one CSV per seed. For the command above the daily files are:
 
 ```text
-runs/five_year_key_metrics_seeds123_run1_seed1_steps.csv
-runs/five_year_key_metrics_seeds123_run1_seed2_steps.csv
-runs/five_year_key_metrics_seeds123_run1_seed3_steps.csv
+runs/five_year_periodic_eval_seeds123_run2_seed1_steps.csv
+runs/five_year_periodic_eval_seeds123_run2_seed2_steps.csv
+runs/five_year_periodic_eval_seeds123_run2_seed3_steps.csv
 ```
 
 Each completed daily transition produces one CSV row containing 15 scalar
@@ -68,20 +79,33 @@ Training and final evaluation share each seed's CSV, distinguished by the
 row is flushed to disk as it is produced. The table can be opened in Excel or
 filtered in Python using `seed`, `episode` and `episode_step`. Existing full
 trajectory logs retain their original format; restart with a new output name
-to use compact logging.
+to use compact logging. Periodic evaluations add only summary records to JSONL,
+so they do not expand the daily CSVs.
 
-To reopen training curves from a saved or currently running log:
+To reopen training, evaluator-return and violation-rate curves from a saved or currently running log:
 
 ```bash
 /Library/Frameworks/Python.framework/Versions/3.9/bin/python3 examples/plot_cascade_parallel.py \
-  --episode-log runs/five_year_key_metrics_seeds123_run1.jsonl
+  --episode-log runs/five_year_periodic_eval_seeds123_run2.jsonl
 ```
 
-To export a figure without opening a window, add
-`--output result/five_year_key_metrics_seeds123_run1.png --no-show`.
-The plot command streams the JSONL file and uses update summaries. A running log must already contain at
-least one completed training update. Curves show available seed histories;
-the seed mean uses only training steps shared by the displayed seeds.
+To export all three figures without opening windows, add
+`--output result/periodic_training.png --evaluator-output result/periodic_evaluator_return.png --violations-output result/periodic_violation_rates.png --no-show`.
+With only `--output NAME.png`, the additional figures are named
+`NAME_evaluator_return.png` and `NAME_violation_rates.png`. The plot command streams the JSONL summaries.
+The evaluator and violation-rate figures are available as soon as Round 0 has been recorded;
+training curves become available after the first update. Running logs show
+available seeds and label their mean accordingly. Means use only common
+observed rounds/steps. A failed evaluation remains a gap, including in the
+seed mean; surviving seeds or windows are not silently reweighted.
+
+Older periodic logs, including `five_year_periodic_eval_seeds123_run1.jsonl`,
+contain penalty totals but omit the violation counts required for these rates.
+The plotter still opens their training and return curves, with an explicit
+warning that violation-rate curves are unavailable. Requesting
+`--violations-output` for such a log reports an error. Penalty magnitudes cannot
+reconstruct violation frequencies, and historical intermediate models were
+not saved; start a new run to record rates at every evaluation round.
 
 Check data, calendars and reset observations for all training windows and the
 evaluation sequence without training:
@@ -93,6 +117,10 @@ PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_
 
 `--skip-final-evaluation` reserves held-out data during tuning.
 `--log-interval N` controls training diagnostic reporting in update rounds.
+`--eval-interval N` controls periodic policy evaluation independently. It must
+be positive and defaults to 1. Round 0 and the last update are always evaluated;
+for example, a 50-update run with interval 7 evaluates rounds 0, 7, 14, 21, 28,
+35, 42, 49 and 50.
 `--evaluation-years` accepts exactly five unique years and uses the remaining
 55 for training. `--help` describes the supported flags. The CLI exposes only
 the current multi-year training pipeline. These checks do not predict whether
@@ -121,6 +149,7 @@ reward settings. CLI arguments override their corresponding YAML values.
 | ValueNorm / shared advantage normalization | Enabled / enabled |
 | Actor / joint KL limits | Disabled unless requested |
 | Daily water-level limits | New action-date CSV, enabled |
+| Periodic evaluation interval / scenarios | Every update / 3 fixed training-only windows |
 
 The launch command explicitly selects gamma=1 for undiscounted five-year net
 return. A separate lambda experiment can use `--gae-lambda 1`; it is not the
@@ -167,13 +196,70 @@ Storage, previous releases, GAE and discount clocks carry across calendar
 boundaries. Time-to-go is scaled by the complete episode horizon. Final storage
 is subject to the final action's daily bounds; it need not equal initial storage.
 
-Evaluation joins the five representative years in their configured order,
+Periodic evaluation measures the initial policy at Round 0 and the updated
+policy after each configured interval. Under the default split, fixed scenarios
+are **2007--2011 (dry), 1991--1995 (median), and 1973--1977 (wet)**. Each contains
+exactly 1,825 consecutive days, ending December 30 of its fifth source year.
+The three scenarios are selected once by minimum, median and maximum mean
+total external inflow among complete training-only windows, with start year
+breaking ties. Selection uses no RNG. Their source dates, inflow hashes and
+initial storage/levels are recorded in `run_configuration.periodic_evaluation`.
+All seeds and rounds use those same scenarios and initial conditions. Labels
+describe training-window flow ranks, not the held-out year classifications.
+
+Each scenario uses a fresh environment and deterministic argmax actions from
+all five actors under `torch.no_grad()`. Random-number states and every actor
+module's training/evaluation mode are restored afterward. Evaluation samples
+never enter collection buffers or optimizer updates. Training progress counts
+only collector steps. These diagnostics do not rank/select policies and do not
+use any held-out source days.
+
+One `periodic_evaluation` JSONL record per seed/round preserves the three
+individual window results plus their arithmetic mean: `evaluator_return`,
+`generation_MWh`/`generation_TWh`, `guaranteed_output_penalty`,
+`ecological_flow_penalty`, `final_storage_m3` and `final_level_m`. Storage/level
+vectors follow WDD/BHT/XLD/XJB/THR order. Return and penalties use the unchanged
+configured discount and reward formula. The record also identifies
+`evaluation_round`, `seed`, `training_steps`, status and successful-window count.
+Physical infeasibility is recorded with its window, failed date/step and reason;
+partial metrics are labelled separately. If any window fails, the aggregate
+metrics are null and the evaluator curve leaves a gap. Other windows are still
+checked and training continues. Unexpected programming errors propagate.
+
+The additional unsmoothed figure is titled **Evaluator Return vs. Evaluation
+Round**. Each point is the mean over the three fixed scenarios for that seed;
+the thick curve and band show the across-seed mean and +/-1 sample SD. The
+default 50-update experiment records rounds 0--50. This measures performance
+and does not impose convergence or alter rewards to obtain a plateau.
+
+A separate two-panel figure shows **Ecological-flow violation rate** and
+**Guaranteed-output violation rate** against evaluation round. Each rate is
+the number of reservoir-days with a positive shortfall divided by all
+reservoir-days with an active requirement, pooled over the three fixed windows.
+For the default five active reservoirs, each seed/round has a denominator of
+`3 * 1825 * 5 = 27,375` reservoir-days per constraint. Counts use the existing
+shortfall tolerance and are undiscounted, independent of gamma and penalty
+weights. This is violation frequency, not relative shortfall severity or the
+fraction of days with any reservoir violating a requirement.
+
+Periodic records and individual windows now retain
+`guaranteed_output_violation_rate` and `ecological_flow_violation_rate` as
+fractions in [0, 1], their `*_violation_count` and
+`*_active_reservoir_days` fields, and per-window `service_shortfalls` summaries.
+The figure converts rates to percent and shows individual seeds, their mean
+and +/-1 sample SD without smoothing. Failed windows leave aggregate rates
+null and curve gaps; no active requirement also yields a null rate.
+
+Final independent evaluation joins the five representative years in their configured order,
 carries storage between them, and uses the same episode horizon. Their forcing
 and date-specific daily bounds are retained. This is a constructed representative sequence,
 rather than a continuous historical record. The evaluator scores the final
-policy without ranking intermediate policies.
+policy without ranking intermediate policies. A physical failure is logged
+explicitly with partial progress before the existing final-evaluation error is
+re-raised; successful final evaluation behavior is unchanged.
 
-`--episode-days` also supports explicitly shortened execution checks. Their
+`--episode-days` also supports explicitly shortened collection checks. Periodic
+scenarios still retain their full 1,825-day horizon. The collector checks'
 actual dates and horizon are recorded; their metrics do not describe a
 full-length experiment.
 
@@ -228,24 +314,25 @@ zero service shortfalls.
 | File or directory | Responsibility |
 | --- | --- |
 | `examples/train_cascade.py` | CLI, complete configuration and 55/5 split |
-| `examples/train_cascade_parallel.py` | Episode input checks, seed orchestration, logging and final evaluation |
+| `examples/train_cascade_parallel.py` | Episode checks, fixed scenarios, seed orchestration, logging and final evaluation |
 | `examples/plot_cascade.py` | Interactive backend availability check |
-| `examples/plot_cascade_parallel.py` | Unsmoothed training curves from launch payloads or saved JSONL logs |
-| `harl/runners/cascade_reservoir_runner.py` | Shared actor/critic construction, parallel collection, update loop and final evaluation |
+| `examples/plot_cascade_parallel.py` | Separate unsmoothed collector and evaluator figures from launch payloads or JSONL |
+| `harl/runners/cascade_reservoir_runner.py` | Parallel collection, unchanged HAPPO updates, periodic and final evaluation |
+| `harl/envs/cascade_reservoir/periodic_evaluation.py` | Fixed training-only scenarios, state isolation, window metrics and failure accounting |
 | `harl/runners/on_policy_ha_runner.py` | Sequential HAPPO updates and likelihood factors |
 | `harl/algorithms/` | Actor and critic objectives, optimizer steps and optional KL controls |
 | `harl/envs/cascade_reservoir/` | Data, episode views, workers, current-transition physics, reward and training diagnostics |
 | `harl/common/` and `harl/models/` | Buffers, normalization and feed-forward networks |
 
 `--diagnostics` reports parameter changes, entropy/KL, surrogate changes and
-Monte Carlo/GAE fit on collected training trajectories. Curves show recorded
+Monte Carlo/GAE fit on collected training trajectories. Collector curves show recorded
 stochastic returns and generation, averaged across the six complete episodes
 collected before an update. They begin after collection and have no fabricated
 episode-zero point. Sampled inflow windows affect their variation.
 
 New JSONL records use `run_configuration`, `training_episode`,
 `training_update`, `training_diagnostics`,
-`final_evaluation_sequence` and `run_complete`.
+`periodic_evaluation`, `final_evaluation_sequence` and `run_complete`.
 Per-episode records include source years, dates and the actual horizon;
 generation units refer to the full episode. Historical files in `runs/` and
 `result/` retain the settings and schemas of the runs that produced them.

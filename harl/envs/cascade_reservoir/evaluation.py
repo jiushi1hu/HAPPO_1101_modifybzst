@@ -39,6 +39,26 @@ class DailyLimitMetrics:
             max_daily_bound_excess_m3=self.max_bound_excess)
 
 
+def _attach_evaluation_progress(error, env, rewards, energy):
+    """Preserve executed-day accounting when a physical evaluation step fails.
+
+    The exception type and normal final-evaluation failure behavior are retained.
+    Periodic evaluation can use this diagnostic without treating a partial
+    trajectory as a complete episode return.
+    """
+    completed = env.index-env.start
+    horizon = env.stop-env.start
+    totals = rewards.summary()
+    error.evaluation_progress = dict(completed_steps=int(completed),
+        episode_step=int(min(completed+1, horizon)),
+        date=env.data.dates[min(env.index, env.stop-1)].isoformat(),
+        partial_storage_m3=env.storage.tolist(),
+        partial_metrics=dict(evaluator_return=totals['episode_reward'],
+            generation_MWh=float(energy), generation_TWh=float(energy/1e6),
+            guaranteed_output_penalty=totals['episode_penalty_guaranteed_output'],
+            ecological_flow_penalty=totals['episode_penalty_ecological_flow']))
+
+
 @torch.no_grad()
 def evaluate_policy(actors, data, physical_config, seed, episode, training_steps, *,
                     gamma, source_years, episode_days=DEFAULT_EPISODE_DAYS,
@@ -76,7 +96,11 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
         obs = env.actor_observations()
         actions = [float(actor.act(obs[i:i+1], deterministic=deterministic).item())
                    for i, actor in enumerate(actors)]
-        env.step(np.asarray(actions))
+        try:
+            env.step(np.asarray(actions))
+        except InfeasibleCascade as exc:
+            _attach_evaluation_progress(exc, env, reward_metrics, energy)
+            raise
         row = env.last_transition
         if step_log is not None:
             log_step(step_record(row, seed=seed, episode=episode,
@@ -108,7 +132,11 @@ def evaluate_policy(actors, data, physical_config, seed, episode, training_steps
     for i, name in enumerate(IDS):
         result[name+'_start_m3'] = float(initial[i])
         result[name+'_end_m3'] = float(env.storage[i])
-    result.update(limit_metrics.finish())
+    try:
+        result.update(limit_metrics.finish())
+    except InfeasibleCascade as exc:
+        _attach_evaluation_progress(exc, env, reward_metrics, energy)
+        raise
     result.update(reward_metrics.summary(detailed=True), **reward_metadata(data),
         reward_penalties=env.reward_settings, reward_aggregation=REWARD_AGGREGATION)
     if diagnostics:
