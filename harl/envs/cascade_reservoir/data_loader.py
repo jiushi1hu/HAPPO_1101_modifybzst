@@ -18,6 +18,20 @@ DEFAULT_EVALUATION_YEARS = (1998, 1999, 1970, 1997, 2006)
 DEFAULT_EVALUATION_LABELS = ("extremely_wet", "wet", "normal", "dry", "extremely_dry")
 
 
+def validate_service_scale(value, name):
+    """Validate a positive sensitivity multiplier without changing source data."""
+    message = name + ' must be finite and positive'
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(message)
+    try:
+        scale = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(message) from exc
+    if not np.isfinite(scale) or scale <= 0.:
+        raise ValueError(message)
+    return scale
+
+
 def resolve_year_split(experiment):
     """Partition all 60 source years into 55 training and five evaluation years.
 
@@ -69,6 +83,9 @@ def read_csv(path):
 class CascadeData:
     def __init__(self, root, config, experiment=None):
         self.root = Path(root).resolve()
+        self.service_requirement_scales = {
+            term: validate_service_scale(config.get(term + '_scale', 1.), term + '_scale')
+            for term in ('guaranteed_output', 'ecological_flow')}
         self.head_model = config.get("head_model", "fixed")
         if self.head_model not in HEAD_MODELS:
             raise ValueError("Unknown head model: " + str(self.head_model))
@@ -257,10 +274,11 @@ class CascadeData:
 
 
 class ServiceRequirementsData:
-    """Fixed daily service thresholds in hydraulic order, with paper provenance.
+    """Fixed daily service thresholds with source values and sensitivity scales.
 
     Zero explicitly disables one requirement. Loading never activates a reward
     or adds a release/power lower bound. Thresholds do not depend on year splits.
+    Effective values are always formed once from the unchanged source CSV.
     """
 
     def __init__(self, data):
@@ -288,17 +306,27 @@ class ServiceRequirementsData:
                 records[name] = row
         if set(records) != set(IDS):
             raise ValueError("Service requirements must contain exactly one row per reservoir")
-        for field, cap in (("guaranteed_output_mw", data.power_cap),
-                           ("ecological_flow_m3s", data.release_cap)):
+        self.threshold_scales = {
+            term: validate_service_scale(getattr(data, 'service_requirement_scales', {}).get(term, 1.),
+                                         term + '_scale')
+            for term in ('guaranteed_output', 'ecological_flow')}
+        for term, field, cap in (("guaranteed_output", "guaranteed_output_mw", data.power_cap),
+                                ("ecological_flow", "ecological_flow_m3s", data.release_cap)):
             try:
-                values = np.array([float(records[name][field]) for name in IDS], dtype=np.float64)
+                base = np.array([float(records[name][field]) for name in IDS], dtype=np.float64)
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("Invalid service requirement: " + field) from exc
-            if not np.isfinite(values).all() or (values < 0).any():
+            if not np.isfinite(base).all() or (base < 0).any():
                 raise ValueError("Service requirements must be finite and nonnegative: " + field)
+            with np.errstate(over='ignore', under='ignore'):
+                values = base * self.threshold_scales[term]
+            if not np.isfinite(values).all() or ((base > 0.) & (values == 0.)).any():
+                raise ValueError("Scaled service requirements must remain finite and preserve active requirements: " + field)
             if (values > cap).any():
                 raise ValueError("Service requirement exceeds configured capacity: " + field)
+            base.setflags(write=False)
             values.setflags(write=False)
+            setattr(self, 'base_' + field, base)
             setattr(self, field, values)
         self.paper_reservoir_ids = tuple(records[name]["paper_reservoir_id"] for name in IDS)
         self.sources = {name: {k: records[name][k] for k in ("source_doi", "source_table")}
@@ -311,7 +339,12 @@ class ServiceRequirementsData:
                     reservoir_ids=list(IDS), paper_reservoir_ids=list(self.paper_reservoir_ids),
                     guaranteed_output_mw=self.guaranteed_output_mw.tolist(),
                     ecological_flow_m3s=self.ecological_flow_m3s.tolist(),
-                    time_basis="constant_daily_requirement", value_status="paper_reported",
+                    base_guaranteed_output_mw=self.base_guaranteed_output_mw.tolist(),
+                    base_ecological_flow_m3s=self.base_ecological_flow_m3s.tolist(),
+                    threshold_scales=dict(self.threshold_scales),
+                    time_basis="constant_daily_requirement", source_value_status="paper_reported",
+                    value_status=("paper_reported" if all(scale == 1. for scale in self.threshold_scales.values())
+                                  else "sensitivity_adjusted"),
                     sources={name: dict(source) for name, source in self.sources.items()})
 
 

@@ -101,7 +101,10 @@ def run_parallel_experiment(data,physical,config,args):
             output='one CSV per seed; JSONL contains summaries and configuration'),
         evaluation='held-out representative years in configured order; storage carries across boundaries; '
                    'one sequence scored after training, without policy ranking',
-        config=config,physical_config=physical,data_hashes=data.hashes,
+        config=config,physical_config=physical,
+        service_requirements=(data.service_requirements.metadata()
+                              if data.service_requirements is not None else None),
+        data_hashes=data.hashes,
         source_code_hashes={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in sources})
     print(json.dumps(metadata,indent=2,allow_nan=False),flush=True)
     if args.check_data_only:

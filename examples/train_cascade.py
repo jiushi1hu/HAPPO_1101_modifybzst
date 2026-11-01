@@ -10,7 +10,8 @@ import yaml
 from harl.algorithms.actors.happo import (
     validate_policy_optimization, validate_kl_rollback, validate_joint_target_kl)
 from harl.algorithms.critics.v_critic import validate_value_normalization
-from harl.envs.cascade_reservoir.data_loader import CascadeData, HEAD_MODELS, resolve_year_split
+from harl.envs.cascade_reservoir.data_loader import (
+    CascadeData, HEAD_MODELS, resolve_year_split, validate_service_scale)
 from harl.envs.cascade_reservoir.episodes import positive_integer
 from harl.envs.cascade_reservoir.reward import reward_settings, validate_discount_factor
 from harl.runners.cascade_reservoir_runner import validate_gae_lambda, validate_seed
@@ -51,6 +52,10 @@ def main():
     joint.add_argument('--joint-target-kl',type=float,help='Cumulative joint KL budget; requires actor rollback')
     joint.add_argument('--no-joint-kl-limit',action='store_true')
     parser.add_argument('--head-model',choices=HEAD_MODELS)
+    parser.add_argument('--guaranteed-output-scale',type=float,
+                        help='Positive multiplier for the reference guaranteed-output thresholds (default: 1)')
+    parser.add_argument('--ecological-flow-scale',type=float,
+                        help='Positive multiplier for the reference ecological-flow thresholds (default: 1)')
     limits = parser.add_mutually_exclusive_group()
     limits.add_argument('--daily-level-limits',dest='daily_level_limits',action='store_true',
                         help='Use the action-date CSV bounds on each next state (default)')
@@ -101,6 +106,10 @@ def main():
         algo['joint_target_kl'] = None
     if args.head_model is not None:
         physical['head_model'] = args.head_model
+    for name in ('guaranteed_output_scale','ecological_flow_scale'):
+        value = getattr(args,name)
+        if value is not None:
+            physical[name] = value
     if args.daily_level_limits is not None:
         physical['use_daily_level_limits'] = args.daily_level_limits
     physical['reward_penalties'] = dict(physical.get('reward_penalties',{}))
@@ -135,6 +144,8 @@ def main():
                 raise ValueError(name+' must divide all collected daily transitions')
         if not isinstance(physical.get('use_daily_level_limits'),bool):
             raise ValueError('use_daily_level_limits must be a boolean')
+        for name in ('guaranteed_output_scale','ecological_flow_scale'):
+            physical[name] = validate_service_scale(physical.get(name,1.),name)
         reward_settings(physical)
         split = resolve_year_split(exp)
         exp.update({name:list(values) for name,values in split.items()})

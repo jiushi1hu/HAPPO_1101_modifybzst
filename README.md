@@ -263,6 +263,44 @@ scenarios still retain their full 1,825-day horizon. The collector checks'
 actual dates and horizon are recorded; their metrics do not describe a
 full-length experiment.
 
+## Service-threshold sensitivity
+
+`--guaranteed-output-scale` and `--ecological-flow-scale` apply positive
+multipliers to the reference thresholds. Both default to 1, preserving the
+original requirements. The reference CSV remains unchanged; effective and
+base values, multipliers and provenance are recorded in the run configuration
+and service-requirement metadata. Adjusted values are labelled
+`sensitivity_adjusted`, rather than paper-reported requirements.
+
+For a first sensitivity experiment, reduce both requirements by 10% and keep
+200 actions, seeds 1/2/3 and the existing training settings:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
+  --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
+  --guaranteed-output-scale 0.9 --ecological-flow-scale 0.9 --diagnostics \
+  --episode-log runs/five_year_bins200_thresholds90_seeds123_run1.jsonl \
+  --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
+```
+
+| Reservoir | Effective guaranteed output (MW) | Effective ecological flow (m3/s) |
+| --- | ---: | ---: |
+| WDD | 2,061 | 810 |
+| BHT | 4,110.75 | 1,044 |
+| XLD | 4,811.13 | 1,044 |
+| XJB | 2,475 | 1,080 |
+| THR | 4,491 | 5,400 |
+
+The effective thresholds are used consistently by training, periodic evaluation,
+final held-out evaluation, reward penalties and violation counts. Penalty weights,
+reward formula, reservoir physics and hard operating bounds are unchanged. All
+requirements remain active, so the periodic rate denominator remains 27,375
+reservoir-days per seed/round. Use both scales equal to 1 for the reference setup.
+Changing thresholds changes the optimization and reporting problem: lower
+violations or higher returns under relaxed requirements alone do not establish
+improvement against the original requirements. Physical generation remains in
+the same units for comparison.
+
 ## Physics, actions and reward
 
 Raw data and source notes live in `data/cascade_reservoir_new/`. Hard constraints
