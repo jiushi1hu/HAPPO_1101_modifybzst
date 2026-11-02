@@ -84,6 +84,10 @@ trajectory logs retain their original format; restart with a new output name
 to use compact logging. Periodic evaluations add only summary records to JSONL,
 so they do not expand the daily CSVs.
 
+Optional final-policy XLD dispatch tables are described under **Xiluodu dispatch
+diagnostics** below. They are separate from these team metrics and do not add
+per-reservoir rows to the training CSVs.
+
 To reopen training, evaluator-return and violation-rate curves from a saved or currently running log:
 
 ```bash
@@ -325,6 +329,27 @@ base values, multipliers and provenance are recorded in the run configuration
 and service-requirement metadata. Adjusted values are labelled
 `sensitivity_adjusted`, rather than paper-reported requirements.
 
+The two CLI values are multipliers, not absolute MW or m3/s values. For example,
+`--guaranteed-output-scale 0.4 --ecological-flow-scale 0.4` gives XLD thresholds
+of `5345.7 * 0.4 = 2138.28 MW` and `1160 * 0.4 = 464 m3/s`.
+
+To make 40% / 40% the file-based default, edit these keys in
+`harl/configs/envs_cfgs/cascade_reservoir.yaml`:
+
+```yaml
+guaranteed_output_scale: 0.4
+ecological_flow_scale: 0.4
+```
+
+Remove the corresponding CLI arguments to use those defaults; explicit CLI
+values always override YAML. Individual reservoir reference values are in
+`data/cascade_reservoir_new/reservoir_service_requirements.csv`, in columns
+`guaranteed_output_mw` and `ecological_flow_m3s`. If that CSV is changed to hold
+custom absolute effective thresholds, set both scales to 1 (in YAML and any CLI
+overrides) to avoid multiplying them again. Editing the CSV redefines the
+reference inputs; preserve accurate source provenance when doing so. Changing
+thresholds does not require editing the reward function or physics code.
+
 For the current sensitivity experiment, use 50% guaranteed output and 70% ecological flow, keeping
 200 actions, seeds 1/2/3 and the existing training settings:
 
@@ -355,6 +380,56 @@ Changing thresholds changes the optimization and reporting problem: lower
 violations or higher returns under relaxed requirements alone do not establish
 improvement against the original requirements. Physical generation remains in
 the same units for comparison.
+
+## Xiluodu dispatch diagnostics
+
+Add `--xld-diagnostics` together with a new `--episode-log` path to inspect the
+final policy's XLD guaranteed-output violations. Diagnostics write one compact
+row for every XLD day in the last scheduled periodic evaluation (three fixed
+training-only windows) and the final held-out sequence. They do not write
+training-worker trajectories or repeat daily traces at earlier evaluation
+rounds. A standard run adds 7,300 rows per seed, or 5,475 when final held-out
+evaluation is skipped. The existing team CSVs and figures retain their formats.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
+  --episodes 300 --episode-days 1825 --parallel-envs 6 \
+  --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
+  --window-sampling coverage_balanced \
+  --guaranteed-output-scale 0.4 --ecological-flow-scale 0.4 \
+  --diagnostics --xld-diagnostics \
+  --episode-log runs/five_year_bins200_g40_e40_xld_seeds123_run1.jsonl \
+  --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
+```
+
+The additional files are named `<log_stem>_seed1_xld_dispatch.csv`, and likewise
+for seeds 2 and 3, beside the JSONL log. Filter their classification column to
+review violations. Scalar records include storage and daily bounds, actual
+inflow and upstream release, selected action, feasible release limits, turbine
+flow, spill, effective head, power, guarantee and shortfall. Violating days also
+include same-state alternative-action and continuous-release power limits.
+Counts and diagnostic definitions are retained in each evaluated window's
+`xld_dispatch_diagnostics` JSONL summary; actual physical failures retain their
+existing failure records and any partial diagnostic summary.
+
+For a violating day, the diagnostic holds today's state, external inflows,
+action-date bounds and the other four actors' originally sampled actions fixed.
+It checks all XLD action indices and accounts for the actual change in
+end-storage and head. A continuous-release check includes stage-storage curve
+breakpoints and interior power maxima; maximum discharge need not maximize
+power. Selected alternatives are verified by the existing full-cascade physics.
+The analysis distinguishes a discrete alternative that meets the guarantee,
+a gap caused by the discrete grid, and same-state water, dispatch, capacity or
+head limitations. Reference-head and optimistic head calculations are diagnostic
+bounds, rather than changes to the physical model.
+
+A feasible same-day alternative establishes that the guarantee could be met
+from that state. It does not establish the best five-year strategy: releasing
+more water changes later storage, while an unfavorable current state may itself
+have resulted from earlier actions. No future inflows or deadline targets are
+used. Diagnostics never replace policy actions, alter rewards, update gradients,
+or change the executed trajectory. Unexpected counterfactual failures raise a
+diagnostic error instead of being counted as failures of the executed policy.
 
 ## Physics, actions and reward
 

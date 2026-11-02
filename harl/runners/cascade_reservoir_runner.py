@@ -48,7 +48,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
     """Independent reservoir actors, centralized critic, and uninterrupted episodes."""
 
     def __init__(self, data, physical_config, algo_args, seed, episode_log=None, step_log=None,
-                 periodic_windows=None, training_sampler=None):
+                 periodic_windows=None, training_sampler=None, xld_log=None):
         seed = validate_seed(seed)
         self.data, self.physical_config = data, physical_config
         self.requested_args = copy.deepcopy(algo_args)
@@ -119,6 +119,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
         self.periodic_evaluation_history = []
         self.episode_log = episode_log
         self.step_log = step_log
+        self.xld_log = xld_log
         self.diagnostics_enabled = bool(args['experiment'].get('diagnostics', False))
         self.joint_kl_info = None
         self.parallel_envs = None
@@ -353,7 +354,8 @@ class CascadeReservoirRunner(OnPolicyHARunner):
             raise RuntimeError('This policy update has already been evaluated')
         record = evaluate_periodic_policy(self.actor, self.data, self.physical_config,
             seed=self.seed, evaluation_round=self.update_count, training_steps=self.training_steps,
-            windows=self.periodic_windows, gamma=self.algo_args['algo']['gamma'])
+            windows=self.periodic_windows, gamma=self.algo_args['algo']['gamma'],
+            xld_log=self.xld_log if self.update_count == self.training_sampler.updates else None)
         self.periodic_evaluation_history.append(record)
         log_episode(record, self.episode_log)
         return record
@@ -373,7 +375,8 @@ class CascadeReservoirRunner(OnPolicyHARunner):
                 row = evaluate_policy(self.actor,self.data,self.physical_config,seed=self.seed,
                     episode=self.completed_episodes,training_steps=self.training_steps,diagnostics=True,
                     gamma=self.algo_args['algo']['gamma'],source_years=years,episode_days=self.length,
-                    step_log=self.step_log)
+                    step_log=self.step_log, xld_log=self.xld_log,
+                    evaluation_round=self.update_count, window_id='held_out_sequence')
         except InfeasibleCascade as exc:
             progress = getattr(exc, 'evaluation_progress', {})
             log_episode(dict(record_type='final_evaluation_sequence', phase='evaluation',
@@ -385,6 +388,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
                     episode_step=progress.get('episode_step', 1),
                     completed_steps=progress.get('completed_steps', 0)),
                 partial_metrics=progress.get('partial_metrics', {}),
+                partial_xld_dispatch_diagnostics=progress.get('xld_dispatch_diagnostics'),
                 episode_reward=None, energy_MWh=None, energy_TWh=None, **metadata), self.episode_log)
             raise  # Preserve the existing final-evaluation stop-on-failure behavior.
         finally:

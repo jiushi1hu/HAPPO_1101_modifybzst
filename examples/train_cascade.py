@@ -16,7 +16,8 @@ from harl.envs.cascade_reservoir.episodes import positive_integer
 from harl.envs.cascade_reservoir.reward import reward_settings, validate_discount_factor
 from harl.envs.cascade_reservoir.training_sampler import SAMPLING_MODES, validate_sampling_mode
 from harl.runners.cascade_reservoir_runner import validate_gae_lambda, validate_seed
-from examples.train_cascade_parallel import run_parallel_experiment, step_metrics_paths, plot_output_paths
+from examples.train_cascade_parallel import (
+    run_parallel_experiment, step_metrics_paths, plot_output_paths, xld_dispatch_paths)
 
 
 def load_configuration():
@@ -72,12 +73,16 @@ def main():
     parser.add_argument('--check-data-only',action='store_true',
                         help='Check data, episode calendars and observations without training')
     parser.add_argument('--diagnostics',action='store_true',help='Record learning signals on collected training episodes')
+    parser.add_argument('--xld-diagnostics',action='store_true',
+                        help='Save daily XLD dispatch diagnostics for the final policy on fixed and held-out evaluation windows; requires --episode-log')
     parser.add_argument('--skip-final-evaluation',action='store_true',help='Reserve evaluation years during tuning')
     parser.add_argument('--episode-log',type=Path,
                         help='New summary JSONL path; also creates compact <stem>_seedN_steps.csv files')
     parser.add_argument('--plot-python',default=sys.executable,help='Python interpreter with interactive Matplotlib')
     parser.add_argument('--no-plot',action='store_true',help='Run without opening plot windows')
     args = parser.parse_args()
+    if args.xld_diagnostics and args.episode_log is None:
+        parser.error('--xld-diagnostics requires --episode-log')
     if args.episode_log is not None and args.episode_log.exists():
         parser.error('episode-log must name a new file')
     config, physical = load_configuration()
@@ -158,11 +163,15 @@ def main():
     for path in step_metrics_paths(args.episode_log,exp['seeds']).values():
         if path.exists():
             parser.error('Daily metrics file already exists: '+str(path))
+    for path in xld_dispatch_paths(args.episode_log,exp['seeds'],args.xld_diagnostics).values():
+        if path.exists():
+            parser.error('XLD diagnostics file already exists: '+str(path))
     if not args.no_plot:
         for path in plot_output_paths(args.episode_log).values():
             if path.exists():
                 parser.error('Figure file already exists: '+str(path))
     exp['diagnostics'] = args.diagnostics
+    exp['xld_diagnostics'] = args.xld_diagnostics
     data = CascadeData(args.data_dir,physical,exp)
     run_parallel_experiment(data,physical,config,args)
 

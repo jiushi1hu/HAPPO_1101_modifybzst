@@ -133,7 +133,7 @@ def _preserve_training_state(actors):
 
 
 def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_round,
-                             training_steps, windows, gamma):
+                             training_steps, windows, gamma, xld_log=None):
     """Measure a frozen policy on all three scenarios without changing training.
 
     Each scenario gets a newly reset environment and deterministic argmax
@@ -159,7 +159,9 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                 measured = evaluate_policy(actors, data, physical_config, seed=int(seed),
                     episode=int(evaluation_round), training_steps=int(training_steps),
                     gamma=gamma, source_years=window['source_years'],
-                    episode_days=window['episode_horizon_days'], deterministic=True)
+                    episode_days=window['episode_horizon_days'], deterministic=True,
+                    xld_log=xld_log, evaluation_round=int(evaluation_round),
+                    window_id=window['window_id'])
             except InfeasibleCascade as exc:
                 progress = getattr(exc, 'evaluation_progress', {})
                 result.update(status='failed', failure=dict(error_type=type(exc).__name__,
@@ -171,6 +173,8 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                 result.update({metric:None for metric in
                                _SCALAR_METRICS+_VECTOR_METRICS+_VIOLATION_METRICS})
                 result['service_shortfalls'] = None
+                if xld_log is not None:
+                    result['partial_xld_dispatch_diagnostics'] = progress.get('xld_dispatch_diagnostics')
             else:
                 final_storage = [measured[name+'_end_m3'] for name in IDS]
                 result.update(evaluator_return=measured['episode_reward'],
@@ -184,6 +188,8 @@ def evaluate_periodic_policy(actors, data, physical_config, *, seed, evaluation_
                     max_daily_bound_excess_m3=measured['max_daily_bound_excess_m3'],
                     service_shortfalls=measured['service_shortfalls'])
                 result.update(_violation_metrics(measured['service_shortfalls']))
+                if xld_log is not None:
+                    result['xld_dispatch_diagnostics'] = measured['xld_dispatch_diagnostics']
             individual.append(result)
     successes = sum(row['status'] == 'ok' for row in individual)
     record = dict(record_type='periodic_evaluation', phase='training_evaluation',

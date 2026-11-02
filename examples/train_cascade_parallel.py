@@ -10,6 +10,7 @@ from harl.envs.cascade_reservoir.periodic_evaluation import (
     PERIODIC_EVALUATION_DAYS, select_periodic_windows)
 from harl.envs.cascade_reservoir.training_metrics import log_episode, StepMetricsWriter, STEP_METRIC_FIELDS
 from harl.envs.cascade_reservoir.training_sampler import TrainingWindowSampler, validate_sampling_mode
+from harl.envs.cascade_reservoir.xld_diagnostics import XLDDispatchWriter, XLD_DIAGNOSTIC_FIELDS
 from harl.runners.cascade_reservoir_runner import CascadeReservoirRunner
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -21,6 +22,14 @@ def step_metrics_paths(episode_log, seeds):
         return {}
     path=Path(episode_log)
     return {seed:path.with_name(path.stem+'_seed'+str(seed)+'_steps.csv') for seed in seeds}
+
+
+def xld_dispatch_paths(episode_log, seeds, enabled=False):
+    """One compact final-policy XLD diagnostic table per seed."""
+    if not enabled or episode_log is None:
+        return {}
+    path=Path(episode_log)
+    return {seed:path.with_name(path.stem+'_seed'+str(seed)+'_xld_dispatch.csv') for seed in seeds}
 
 
 def plot_output_paths(episode_log):
@@ -55,11 +64,19 @@ def run_parallel_experiment(data,physical,config,args):
     training_samplers={seed:TrainingWindowSampler(data,days,episodes,count,seed,mode=sampling_mode)
                        for seed in config['experiment']['seeds']}
     bins=config['model']['action_bins']
+    xld_enabled=config['experiment'].get('xld_diagnostics',False)
+    if not isinstance(xld_enabled,bool):
+        raise ValueError('xld_diagnostics must be a boolean')
+    if xld_enabled and args.episode_log is None:
+        raise ValueError('XLD diagnostics require --episode-log')
+    if xld_enabled and data.service_requirements is None:
+        raise ValueError('XLD diagnostics require loaded service requirements')
     daily_paths=step_metrics_paths(args.episode_log,config['experiment']['seeds'])
+    xld_paths=xld_dispatch_paths(args.episode_log,config['experiment']['seeds'],xld_enabled)
     figure_paths={} if args.no_plot else plot_output_paths(args.episode_log)
     periodic_windows=select_periodic_windows(data)
     for path in (([] if args.episode_log is None else [args.episode_log])+
-                 list(daily_paths.values())+list(figure_paths.values())):
+                 list(daily_paths.values())+list(xld_paths.values())+list(figure_paths.values())):
         if path.exists():
             raise ValueError('Output file already exists: '+str(path))
     evaluation_years=list(data.evaluation_years)
@@ -92,6 +109,15 @@ def run_parallel_experiment(data,physical,config,args):
             violation_rate_units='fraction (plots display percent)',
             role='fixed training-only convergence diagnostics; held-out years are reserved for final evaluation'),
         figure_paths={name:str(path.resolve()) for name,path in figure_paths.items()},
+        xld_dispatch_diagnostics=dict(enabled=xld_enabled, reservoir='XLD',
+            scope='every XLD day in the final scheduled periodic evaluation and final held-out evaluation only',
+            training_rows_written=False, files={str(seed):str(path.resolve()) for seed,path in xld_paths.items()},
+            expected_rows_per_seed=(3*PERIODIC_EVALUATION_DAYS+(0 if args.skip_final_evaluation else days))
+                if xld_enabled else 0,
+            columns=list(XLD_DIAGNOSTIC_FIELDS),
+            counterfactual='same current state and action-date bounds; all other reservoir actions held fixed',
+            interpretation='same-day physical attainability; no future inflows, action replacement or claim of long-term optimality',
+            data_precision='10 significant digits in CSV; internal calculations and JSON summaries retain full precision'),
         calendar='fixed consecutive daily steps with leap days retained; storage carries across source-year boundaries',
         release_bounds_scope='current_transition',
         daily_bound_alignment='action_date=t constrains the state after action t; no additional date shift',
@@ -123,17 +149,20 @@ def run_parallel_experiment(data,physical,config,args):
     with ExitStack() as outputs:
         stream=None
         daily_writers={}
+        xld_writers={}
         if args.episode_log is not None:
             args.episode_log.parent.mkdir(parents=True,exist_ok=True)
             stream=outputs.enter_context(args.episode_log.open('x',encoding='utf-8'))
             daily_writers={seed:StepMetricsWriter(outputs.enter_context(
                 path.open('x',encoding='utf-8',newline=''))) for seed,path in daily_paths.items()}
+            xld_writers={seed:XLDDispatchWriter(outputs.enter_context(
+                path.open('x',encoding='utf-8',newline=''))) for seed,path in xld_paths.items()}
         log_episode(metadata,stream)
         runners=[]
         for seed in config['experiment']['seeds']:
             runner=CascadeReservoirRunner(data,physical,config,seed,episode_log=stream,
                                           step_log=daily_writers.get(seed),periodic_windows=periodic_windows,
-                                          training_sampler=training_samplers[seed])
+                                          training_sampler=training_samplers[seed],xld_log=xld_writers.get(seed))
             runner.run(episodes,interval)
             runners.append(runner)
         evaluations=[] if args.skip_final_evaluation else [row for runner in runners for row in runner.final_evaluation()]
