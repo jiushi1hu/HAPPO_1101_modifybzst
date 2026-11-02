@@ -14,6 +14,7 @@ from harl.envs.cascade_reservoir.data_loader import (
     CascadeData, HEAD_MODELS, resolve_year_split, validate_service_scale)
 from harl.envs.cascade_reservoir.episodes import positive_integer
 from harl.envs.cascade_reservoir.reward import reward_settings, validate_discount_factor
+from harl.envs.cascade_reservoir.training_sampler import SAMPLING_MODES, validate_sampling_mode
 from harl.runners.cascade_reservoir_runner import validate_gae_lambda, validate_seed
 from examples.train_cascade_parallel import run_parallel_experiment, step_metrics_paths, plot_output_paths
 
@@ -31,6 +32,8 @@ def main():
     parser.add_argument('--episodes',type=int,help='Completed multi-year episodes per seed (default: 300)')
     parser.add_argument('--episode-days',type=int,help='Daily decisions per episode (default: 1825)')
     parser.add_argument('--parallel-envs',type=int,help='Independent worker environments (default: 6)')
+    parser.add_argument('--window-sampling',choices=SAMPLING_MODES,
+                        help='Training-window schedule: coverage_balanced (default) or legacy uniform sampling')
     parser.add_argument('--log-interval',type=int,help='Print training diagnostics every N updates')
     parser.add_argument('--eval-interval',type=int,
                         help='Evaluate fixed training scenarios every N updates (default: 1); also at round 0 and the last update')
@@ -53,9 +56,9 @@ def main():
     joint.add_argument('--no-joint-kl-limit',action='store_true')
     parser.add_argument('--head-model',choices=HEAD_MODELS)
     parser.add_argument('--guaranteed-output-scale',type=float,
-                        help='Positive multiplier for the reference guaranteed-output thresholds (default: 1)')
+                        help='Positive multiplier for reference guaranteed-output thresholds; defaults to environment YAML, 1 restores reference values')
     parser.add_argument('--ecological-flow-scale',type=float,
-                        help='Positive multiplier for the reference ecological-flow thresholds (default: 1)')
+                        help='Positive multiplier for reference ecological-flow thresholds; defaults to environment YAML, 1 restores reference values')
     limits = parser.add_mutually_exclusive_group()
     limits.add_argument('--daily-level-limits',dest='daily_level_limits',action='store_true',
                         help='Use the action-date CSV bounds on each next state (default)')
@@ -79,7 +82,7 @@ def main():
         parser.error('episode-log must name a new file')
     config, physical = load_configuration()
     exp, train, model, algo = (config[key] for key in ('experiment','train','model','algo'))
-    for name in ('episodes','log_interval','seeds','eval_interval'):
+    for name in ('episodes','log_interval','seeds','eval_interval','window_sampling'):
         value = getattr(args,name)
         if value is not None:
             exp[name] = value
@@ -121,6 +124,7 @@ def main():
         exp['episodes'] = positive_integer(exp['episodes'],'episodes')
         exp['log_interval'] = positive_integer(exp['log_interval'],'log_interval')
         exp['eval_interval'] = positive_integer(exp.get('eval_interval',1),'eval_interval')
+        exp['window_sampling'] = validate_sampling_mode(exp.get('window_sampling','coverage_balanced'))
         if exp['episodes'] % train['n_rollout_threads']:
             raise ValueError('episodes must be divisible by parallel_envs')
         if not isinstance(exp['seeds'],(list,tuple)) or not exp['seeds']:

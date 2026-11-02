@@ -1,4 +1,4 @@
-"""Separate unsmoothed collector and fixed-scenario evaluator curves."""
+"""Unsmoothed seed means and standard deviations for collection and evaluation."""
 import argparse
 import json
 from pathlib import Path
@@ -261,7 +261,7 @@ def make_figure(payload):
            for grid in grids):
         raise ValueError('Training steps must increase; curves start after collection')
     # A running multi-seed experiment can have completed only some seeds or
-    # updates. Show every observed point and average only common observed steps.
+    # updates. Average only common observed steps; individual curves stay hidden.
     common_steps = set(grids[0])
     for grid in grids[1:]:
         common_steps.intersection_update(grid)
@@ -279,19 +279,18 @@ def make_figure(payload):
     prefix = 'Mean collected episode'
     for ax, series, label in zip(axes, values,
             (prefix+' net return (gamma={:g})'.format(gamma), prefix+' generation (TWh)')):
-        for seed, grid, row in zip(seeds, grids, series):
-            ax.plot(grid, row, alpha=.35, lw=.8, marker='o' if len(grid) == 1 else None,
-                    label='Seed {}'.format(seed))
         if len(mean_grid):
             aligned = np.array([row[np.searchsorted(grid, mean_grid)] for grid, row in zip(grids, series)])
             mean = aligned.mean(axis=0)
             configured = payload.get('configured_seeds', payload['seeds'])
             mean_label = ('Seed mean' if len(configured) == len(series) else
                           'Available-seed mean (n={})'.format(len(series)))
-            ax.plot(mean_grid, mean, lw=2, marker='o' if len(mean_grid) == 1 else None, label=mean_label)
+            ax.plot(mean_grid, mean, lw=2, color='crimson',
+                    marker='o' if len(mean_grid) == 1 else None, label=mean_label)
             if len(series) > 1:
                 sd = aligned.std(axis=0, ddof=1)
-                ax.fill_between(mean_grid, mean-sd, mean+sd, alpha=.15, label='Seed +/-1 SD')
+                ax.fill_between(mean_grid, mean-sd, mean+sd, alpha=.15,
+                                color='crimson', label='Seed +/-1 SD')
         horizon = 'Five-year (1,825-day)' if days == 1825 else '{}-day diagnostic'.format(days)
         ax.set(xlabel='Collected daily environment transitions', ylabel=label,
                title=horizon+' stochastic training episodes (in-sample)')
@@ -319,22 +318,20 @@ def periodic_histories(payload):
 
 
 def plot_periodic_series(ax, payload, seeds, grids, values, missing_label):
-    """Use the same raw-point, complete-seed aggregation for every evaluator metric."""
+    """Draw only the seed mean and SD, preserving unavailable-round annotations."""
     from matplotlib.ticker import MaxNLocator
     # Keep missing/failed evaluations as NaN instead of averaging fewer seeds.
     rounds = np.unique(np.concatenate(grids))
     aligned = np.full((len(seeds), len(rounds)), np.nan)
-    failed_count = 0
-    for i, (seed, grid, series) in enumerate(zip(seeds, grids, values)):
+    failed_rounds = set()
+    for i, (grid, series) in enumerate(zip(grids, values)):
         aligned[i, np.searchsorted(rounds, grid)] = series
-        ax.plot(grid, series, lw=1, alpha=.55, marker='o', markersize=2.5,
-                label='Seed {}'.format(seed))
         failed = ~np.isfinite(series)
-        failed_count += int(failed.sum())
-        if failed.any():
-            ax.plot(grid[failed], np.full(int(failed.sum()), .025), 'x', color='crimson',
-                    transform=ax.get_xaxis_transform(), clip_on=False,
-                    label=missing_label if failed_count == int(failed.sum()) else None)
+        failed_rounds.update(grid[failed].tolist())
+    if failed_rounds:
+        failed_grid = sorted(failed_rounds)
+        ax.scatter(failed_grid, np.full(len(failed_grid), .025), marker='x', color='crimson',
+                   transform=ax.get_xaxis_transform(), clip_on=False, label=missing_label)
     valid = np.isfinite(aligned).all(axis=0)
     mean = np.full(len(rounds), np.nan)
     mean[valid] = aligned[:, valid].mean(axis=0)
@@ -357,7 +354,7 @@ def plot_periodic_series(ax, payload, seeds, grids, values, missing_label):
 
 
 def make_evaluator_figure(payload):
-    """Plot measured returns; failures remain gaps in seed and mean curves."""
+    """Plot the mean measured return and seed SD; failures remain gaps."""
     import matplotlib.pyplot as plt
     seeds, histories, grids = periodic_histories(payload)
     values = [np.asarray([np.nan if row['evaluator_return'] is None else

@@ -14,11 +14,12 @@ timestep_seconds: 86400.0
 release_mapping: quadratic
 # Supplied permitted levels for the state reached after each action date.
 use_daily_level_limits: true
-# Fixed guaranteed-output and ecological-flow thresholds from paper Table A.1.
+# Reference guaranteed-output and ecological-flow thresholds from paper Table A.1.
 load_service_requirements: true
-# Explicit sensitivity multipliers; 1 preserves the reference CSV values.
-guaranteed_output_scale: 1.0
-ecological_flow_scale: 1.0
+# Current sensitivity experiment: guaranteed output 50%, ecological flow 70% of reference.
+# Each multiplier applies directly to the original CSV; use 1 to restore reference values.
+guaranteed_output_scale: 0.5
+ecological_flow_scale: 0.7
 # Requirement-relative shortfalls averaged over each fixed active reservoir set.
 # Unit weights are prespecified tradeoffs, not calibrated or monetary costs.
 reward_penalties:

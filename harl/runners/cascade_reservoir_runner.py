@@ -18,6 +18,7 @@ from harl.envs.cascade_reservoir.periodic_evaluation import (
 from harl.envs.cascade_reservoir.reservoir_physics import InfeasibleCascade
 from harl.envs.cascade_reservoir.reward import EpisodeRewardMetrics, reward_settings, validate_discount_factor
 from harl.envs.cascade_reservoir.training_metrics import log_episode, log_step, step_record
+from harl.envs.cascade_reservoir.training_sampler import TrainingWindowSampler, validate_sampling_mode
 from harl.runners.on_policy_ha_runner import OnPolicyHARunner
 from harl.utils.trans_tools import _t2n
 
@@ -47,7 +48,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
     """Independent reservoir actors, centralized critic, and uninterrupted episodes."""
 
     def __init__(self, data, physical_config, algo_args, seed, episode_log=None, step_log=None,
-                 periodic_windows=None):
+                 periodic_windows=None, training_sampler=None):
         seed = validate_seed(seed)
         self.data, self.physical_config = data, physical_config
         self.requested_args = copy.deepcopy(algo_args)
@@ -76,9 +77,21 @@ class CascadeReservoirRunner(OnPolicyHARunner):
         self.periodic_windows = copy.deepcopy(
             select_periodic_windows(data) if periodic_windows is None else periodic_windows)
         self.training_window_starts = tuple(self.windows)
-        self.window_rng = np.random.RandomState(seed)
         self.sampled_window_starts = []
         self.seed, self.num_agents = seed, 5
+        self.window_sampling_mode = validate_sampling_mode(
+            args['experiment'].get('window_sampling', 'coverage_balanced'))
+        self.training_sampler = (self._make_training_sampler(args['experiment']['episodes'])
+                                 if training_sampler is None else training_sampler)
+        if (not isinstance(self.training_sampler, TrainingWindowSampler) or
+                self.training_sampler.seed != seed or
+                self.training_sampler.episode_days != self.length or
+                self.training_sampler.episodes != args['experiment']['episodes'] or
+                self.training_sampler.batch_size != self.n_envs or
+                self.training_sampler.mode != self.window_sampling_mode or
+                self.training_sampler.batches_consumed or
+                tuple(self.training_sampler.window_starts) != self.training_window_starts):
+            raise ValueError('Training sampling plan does not match this runner configuration')
         self.fixed_order = args['algo']['fixed_order']
         self.action_aggregation = 'prod'
         self.device = torch.device('cpu')
@@ -111,8 +124,12 @@ class CascadeReservoirRunner(OnPolicyHARunner):
         self.parallel_envs = None
         self.worker_pids = []
 
-    def sample_training_window_start(self):
-        return int(self.window_rng.choice(self.training_window_starts))
+    def _make_training_sampler(self, episodes):
+        return TrainingWindowSampler(self.data, self.length, episodes, self.n_envs,
+                                     self.seed, mode=self.window_sampling_mode)
+
+    def training_coverage_summary(self):
+        return self.training_sampler.coverage_summary(self.sampled_window_starts)
 
     def _allocate_buffers(self):
         args, env = self.algo_args, self.envs[0]
@@ -145,7 +162,7 @@ class CascadeReservoirRunner(OnPolicyHARunner):
     def collect_batch(self, episodes):
         if episodes != self.n_envs:
             raise ValueError('A collection round must contain one full episode per parallel environment')
-        years = [self.sample_training_window_start() for _ in range(self.n_envs)]
+        years = self.training_sampler.next_batch()
         if any(year not in self.windows for year in years):
             raise ValueError('Sampled window includes unavailable or evaluation daily data')
         self.batch_window_starts = years
@@ -206,6 +223,11 @@ class CascadeReservoirRunner(OnPolicyHARunner):
                 record.update(failed_episodes_so_far=self.hard_failed_episodes,
                     hard_constraint_failure_rate_so_far=self.hard_failed_episodes/self.episode_attempts)
                 log_episode(record, self.episode_log)
+            log_episode(dict(record_type='training_sampling_aborted', seed=self.seed,
+                attempted_window_starts=years, cause=str(exc),
+                completed_training_coverage=self.training_coverage_summary(),
+                coverage_scope='successfully collected full batches only; this failed batch is excluded'),
+                self.episode_log)
             self.close()
             raise
         metrics = []
@@ -250,10 +272,15 @@ class CascadeReservoirRunner(OnPolicyHARunner):
         log_interval = positive_integer(log_interval, 'log_interval')
         if episodes % self.n_envs:
             raise ValueError('Total episodes must be divisible by parallel_envs; no dropped or padded lanes')
-        if self.completed_episodes or self.update_count:
+        if (self.completed_episodes or self.update_count or self.episode_attempts or
+                self.training_sampler.batches_consumed):
             raise RuntimeError('This runner has already collected episodes; model resume is not implemented')
+        if self.training_sampler.episodes != episodes:
+            self.training_sampler = self._make_training_sampler(episodes)
         updates = episodes//self.n_envs
         try:
+            log_episode(dict(self.training_sampler.metadata(), record_type='training_sampling_plan'),
+                        self.episode_log)
             self.periodic_evaluation()
             for k in range(1, updates+1):
                 if self.algo_args['train']['use_linear_lr_decay']:
@@ -292,7 +319,8 @@ class CascadeReservoirRunner(OnPolicyHARunner):
                     joint_target_kl=self.requested_args['algo'].get('joint_target_kl'),joint_kl=self.joint_kl_info,
                     actor_optimization=[{key:float(info[key]) for key in optimization_keys if key in info}
                         for info in actor_info], episode_reward_mean=self.last_reward_metrics['episode_reward'],
-                    episode_generation_TWh_mean=self.last_rollout['episode_energy_TWh']),self.episode_log)
+                    episode_generation_TWh_mean=self.last_rollout['episode_energy_TWh'],
+                    training_sampling_coverage=self.training_coverage_summary()),self.episode_log)
                 if self.diagnostics_enabled:
                     from harl.envs.cascade_reservoir.diagnostics import after_update, print_update_window
                     report = after_update(self, diagnostic_before)

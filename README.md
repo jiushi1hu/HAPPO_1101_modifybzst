@@ -13,6 +13,8 @@ The environment resolves releases upstream to downstream with zero travel delay.
 - Each reservoir has **100 discrete actions** by default.
 - Fixed training-only scenarios are evaluated at **Round 0 and after each update**.
 - The final trained policy is evaluated after all training seeds finish.
+- Training uses a reproducible schedule that targets balanced year-day coverage, with distinct windows within each parallel batch.
+- Current service-threshold sensitivity: **50% guaranteed output and 70% ecological flow**, relative to the reference CSV.
 
 The standard budget is 300 completed episodes per seed: 50 HAPPO updates and
 547,500 daily environment transitions. Each update collects six complete
@@ -98,6 +100,9 @@ training curves become available after the first update. Running logs show
 available seeds and label their mean accordingly. Means use only common
 observed rounds/steps. A failed evaluation remains a gap, including in the
 seed mean; surviving seeds or windows are not silently reweighted.
+Each subplot displays one across-seed mean curve and a shaded +/-1 sample
+standard deviation band. Individual seed curves are hidden; all per-seed values
+remain in the logs. No smoothing or standard-error conversion is applied.
 
 Older periodic logs, including `five_year_periodic_eval_seeds123_run1.jsonl`,
 contain penalty totals but omit the violation counts required for these rates.
@@ -150,6 +155,8 @@ reward settings. CLI arguments override their corresponding YAML values.
 | Actor / joint KL limits | Disabled unless requested |
 | Daily water-level limits | New action-date CSV, enabled |
 | Periodic evaluation interval / scenarios | Every update / 3 fixed training-only windows |
+| Training-window sampling | `coverage_balanced`; `uniform` restores the previous sampler |
+| Guaranteed-output / ecological-flow threshold scale | 0.50 / 0.70 of reference CSV values |
 
 The launch command explicitly selects gamma=1 for undiscounted five-year net
 return. A separate lambda experiment can use `--gae-lambda 1`; it is not the
@@ -227,8 +234,8 @@ metrics are null and the evaluator curve leaves a gap. Other windows are still
 checked and training continues. Unexpected programming errors propagate.
 
 The additional unsmoothed figure is titled **Evaluator Return vs. Evaluation
-Round**. Each point is the mean over the three fixed scenarios for that seed;
-the thick curve and band show the across-seed mean and +/-1 sample SD. The
+Round**. Each seed's recorded return is the mean over its three fixed scenarios;
+the displayed curve and band show only the across-seed mean and +/-1 sample SD. The
 default 50-update experiment records rounds 0--50. This measures performance
 and does not impose convergence or alter rewards to obtain a plateau.
 
@@ -246,7 +253,7 @@ Periodic records and individual windows now retain
 `guaranteed_output_violation_rate` and `ecological_flow_violation_rate` as
 fractions in [0, 1], their `*_violation_count` and
 `*_active_reservoir_days` fields, and per-window `service_shortfalls` summaries.
-The figure converts rates to percent and shows individual seeds, their mean
+The figure converts rates to percent and shows one across-seed mean curve
 and +/-1 sample SD without smoothing. Failed windows leave aggregate rates
 null and curve gaps; no active requirement also yields a null rate.
 
@@ -263,39 +270,87 @@ scenarios still retain their full 1,825-day horizon. The collector checks'
 actual dates and horizon are recorded; their metrics do not describe a
 full-length experiment.
 
+## Training-window coverage
+
+`--window-sampling coverage_balanced` is the default. It targets equal numbers
+of simulated training days per calendar year, rather than equal probabilities
+for overlapping five-year windows. The coverage matrix uses actual source
+dates, including leap days and truncated final calendar years. It never adds
+held-out days or joins nonconsecutive years to form training episodes.
+
+The sampler computes constrained window probabilities, converts them to a
+fixed-budget integer schedule and shuffles that schedule using a private RNG
+for each seed. Parallel batches contain distinct window starts. Every window
+is included when the episode budget permits; short runs cannot guarantee full
+coverage. There are no additional training episodes or optimizer updates.
+
+Exact equal coverage is generally impossible under the fixed five-year horizon
+and split gaps. Logs retain the residual imbalance instead of claiming perfect
+balance. `run_configuration.training_window_sampling` and per-seed
+`training_sampling_plan` records describe the target probabilities and planned
+coverage. Each `training_update.training_sampling_coverage` reports cumulative
+window counts, year appearances and actual simulated days per year. Final
+coverage is also recorded in `run_complete.training_sampling_coverage_per_seed`.
+These counts include successfully collected full training batches; periodic
+evaluations and partial failed batches are excluded. A failed batch is logged
+as `training_sampling_aborted` and is not replaced to satisfy the schedule.
+
+For comparison, `--window-sampling uniform` preserves the previous independent,
+uniform draws with replacement, using the same per-seed random sequence. It
+allows duplicate windows within a batch. Both modes leave the fixed periodic
+evaluation windows and final held-out evaluation unchanged. There is no new
+wet/normal/dry classification or hydrological-class stratification.
+
+To compare the new sampler with the most recent G40/E60 experiment, keep its
+other settings fixed:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
+  --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
+  --window-sampling coverage_balanced \
+  --guaranteed-output-scale 0.4 --ecological-flow-scale 0.6 --diagnostics \
+  --episode-log runs/five_year_bins200_g40_e60_coverage_balanced_seeds123_run1.jsonl \
+  --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
+```
+
 ## Service-threshold sensitivity
 
 `--guaranteed-output-scale` and `--ecological-flow-scale` apply positive
-multipliers to the reference thresholds. Both default to 1, preserving the
-original requirements. The reference CSV remains unchanged; effective and
+multipliers to the reference thresholds. The current environment configuration
+sets guaranteed output to **0.50** and ecological flow to **0.70** of reference,
+reductions of 50% and 30% from the original requirements respectively. Multipliers always
+apply directly to the original CSV, so reductions do not compound. The reference
+CSV remains unchanged; effective and
 base values, multipliers and provenance are recorded in the run configuration
 and service-requirement metadata. Adjusted values are labelled
 `sensitivity_adjusted`, rather than paper-reported requirements.
 
-For a first sensitivity experiment, reduce both requirements by 10% and keep
+For the current sensitivity experiment, use 50% guaranteed output and 70% ecological flow, keeping
 200 actions, seeds 1/2/3 and the existing training settings:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /opt/anaconda3/envs/harl/bin/python -B examples/train_cascade.py \
   --episodes 300 --action-bins 200 --seeds 1 2 3 --gamma 1 --eval-interval 1 \
-  --guaranteed-output-scale 0.9 --ecological-flow-scale 0.9 --diagnostics \
-  --episode-log runs/five_year_bins200_thresholds90_seeds123_run1.jsonl \
+  --guaranteed-output-scale 0.5 --ecological-flow-scale 0.7 --diagnostics \
+  --episode-log runs/five_year_bins200_g50_e70_mean_sd_seeds123_run1.jsonl \
   --plot-python /Library/Frameworks/Python.framework/Versions/3.9/bin/python3
 ```
 
 | Reservoir | Effective guaranteed output (MW) | Effective ecological flow (m3/s) |
 | --- | ---: | ---: |
-| WDD | 2,061 | 810 |
-| BHT | 4,110.75 | 1,044 |
-| XLD | 4,811.13 | 1,044 |
-| XJB | 2,475 | 1,080 |
-| THR | 4,491 | 5,400 |
+| WDD | 1,145 | 630 |
+| BHT | 2,283.75 | 812 |
+| XLD | 2,672.85 | 812 |
+| XJB | 1,375 | 840 |
+| THR | 2,495 | 4,200 |
 
 The effective thresholds are used consistently by training, periodic evaluation,
 final held-out evaluation, reward penalties and violation counts. Penalty weights,
 reward formula, reservoir physics and hard operating bounds are unchanged. All
 requirements remain active, so the periodic rate denominator remains 27,375
 reservoir-days per seed/round. Use both scales equal to 1 for the reference setup.
+Use both equal to 0.9 to reproduce the previous relaxed-threshold experiment.
+Use both equal to 0.75 to reproduce the previous 75% experiment.
 Changing thresholds changes the optimization and reporting problem: lower
 violations or higher returns under relaxed requirements alone do not establish
 improvement against the original requirements. Physical generation remains in

@@ -52,7 +52,8 @@ experiment:
   collection_mode: five_year_parallel
   evaluation_years: [1998, 1999, 1970, 1997, 2006]  # The other 55 source years are used for training.
   evaluation_labels: [extremely_wet, wet, normal, dry, extremely_dry]
-  episode_mode: random_training_window
+  episode_mode: consecutive_training_window
+  window_sampling: coverage_balanced  # Approximate equal year-day exposure; uniform restores legacy draws.
   episodes: 300  # Completed five-year episodes per seed; divisible by six workers (50 updates).
   log_interval: 1  # Diagnostic reporting cadence in HAPPO update rounds.
   eval_interval: 1  # Fixed training-window evaluation at round 0, every N updates, and the final update.

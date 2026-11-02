@@ -9,6 +9,7 @@ from harl.envs.cascade_reservoir.episodes import episode_environment, positive_i
 from harl.envs.cascade_reservoir.periodic_evaluation import (
     PERIODIC_EVALUATION_DAYS, select_periodic_windows)
 from harl.envs.cascade_reservoir.training_metrics import log_episode, StepMetricsWriter, STEP_METRIC_FIELDS
+from harl.envs.cascade_reservoir.training_sampler import TrainingWindowSampler, validate_sampling_mode
 from harl.runners.cascade_reservoir_runner import CascadeReservoirRunner
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -50,6 +51,9 @@ def run_parallel_experiment(data,physical,config,args):
     if episodes % count:
         raise ValueError('episodes must be divisible by parallel_envs')
     windows=training_windows(data,days)
+    sampling_mode=validate_sampling_mode(config['experiment'].get('window_sampling','coverage_balanced'))
+    training_samplers={seed:TrainingWindowSampler(data,days,episodes,count,seed,mode=sampling_mode)
+                       for seed in config['experiment']['seeds']}
     bins=config['model']['action_bins']
     daily_paths=step_metrics_paths(args.episode_log,config['experiment']['seeds'])
     figure_paths={} if args.no_plot else plot_output_paths(args.episode_log)
@@ -75,6 +79,9 @@ def run_parallel_experiment(data,physical,config,args):
         evaluation_source_years=evaluation_years,evaluation_year_count=len(evaluation_years),
         evaluation_labels=list(data.evaluation_labels),training_window_starts=list(windows),
         training_window_source_years=windows,policy_source='final_training_update',
+        training_window_sampling=dict(mode=sampling_mode,
+            coverage_scope='completed training episodes only; evaluation and partial failed batches excluded',
+            seed_plans=[sampler.metadata() for sampler in training_samplers.values()]),
         periodic_evaluation=dict(eval_interval=eval_interval,
             episode_horizon_days=PERIODIC_EVALUATION_DAYS,windows=periodic_windows,
             schedule='round 0, every eval_interval completed updates, and the final update',
@@ -125,7 +132,8 @@ def run_parallel_experiment(data,physical,config,args):
         runners=[]
         for seed in config['experiment']['seeds']:
             runner=CascadeReservoirRunner(data,physical,config,seed,episode_log=stream,
-                                          step_log=daily_writers.get(seed),periodic_windows=periodic_windows)
+                                          step_log=daily_writers.get(seed),periodic_windows=periodic_windows,
+                                          training_sampler=training_samplers[seed])
             runner.run(episodes,interval)
             runners.append(runner)
         evaluations=[] if args.skip_final_evaluation else [row for runner in runners for row in runner.final_evaluation()]
@@ -137,6 +145,7 @@ def run_parallel_experiment(data,physical,config,args):
             periodic_evaluations_per_seed=[len(runner.periodic_evaluation_history) for runner in runners],
             periodic_evaluation_failures_per_seed=[sum(row['status']=='failed'
                 for row in runner.periodic_evaluation_history) for runner in runners],
+            training_sampling_coverage_per_seed=[runner.training_coverage_summary() for runner in runners],
             final_policy_metadata=[runner.evaluation_policy_metadata() for runner in runners],
             evaluation_skipped=bool(args.skip_final_evaluation),evaluations=evaluations)
         log_episode(result,stream)
