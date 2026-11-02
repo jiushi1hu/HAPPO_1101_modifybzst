@@ -26,19 +26,19 @@ Efficiency remains the existing constant 0.90. It is a model assumption, not a n
 
 ## CSV fields
 
-| Field | Meaning and provenance |
-| --- | --- |
-| `reservoir_id` | Existing hydraulic order: WDD, BHT, XLD, XJB, THR. |
-| `data_status` | `assumed_sensitivity_only`; no row is measured or calibrated. |
-| `operating_level_min_m` | Lower elevation from the existing environment configuration, checked against the storage-elevation curve. |
-| `operating_level_max_m` | Upper elevation from that configuration, checked against the curve and all 60 calendar-year-start storage records. The full curve may extend above this operating limit. |
-| `assumed_reference_forebay_level_m` | Arithmetic midpoint of the two operating elevations; an explicitly assumed anchor. |
-| `reference_net_head_m` | Existing `reservoir_parameters.csv:typical_net_head_m`, paired with the assumed anchor only for this scenario. |
-| `assumed_effective_tailwater_plus_loss_m` | Derived `Z_ref - H_ref`; not a separately identified physical tailwater or loss. |
-| `head_slope_m_per_m` | Assumed 1.0 for the constant combined-boundary scenario. |
-| `scenario_net_head_min_m` | Derived head at the lower operating elevation. |
-| `scenario_net_head_max_m` | Derived head at the upper operating elevation. |
-| `efficiency` | Existing constant efficiency, stored as a fraction. |
+| Field                                     | Meaning and provenance                                                                                                                                                   |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `reservoir_id`                            | Existing hydraulic order: WDD, BHT, XLD, XJB, THR.                                                                                                                       |
+| `data_status`                             | `assumed_sensitivity_only`; no row is measured or calibrated.                                                                                                            |
+| `operating_level_min_m`                   | Lower elevation from the existing environment configuration, checked against the storage-elevation curve.                                                                |
+| `operating_level_max_m`                   | Upper elevation from that configuration, checked against the curve and all 60 calendar-year-start storage records. The full curve may extend above this operating limit. |
+| `assumed_reference_forebay_level_m`       | Arithmetic midpoint of the two operating elevations; an explicitly assumed anchor.                                                                                       |
+| `reference_net_head_m`                    | Existing `reservoir_parameters.csv:typical_net_head_m`, paired with the assumed anchor only for this scenario.                                                           |
+| `assumed_effective_tailwater_plus_loss_m` | Derived `Z_ref - H_ref`; not a separately identified physical tailwater or loss.                                                                                         |
+| `head_slope_m_per_m`                      | Assumed 1.0 for the constant combined-boundary scenario.                                                                                                                 |
+| `scenario_net_head_min_m`                 | Derived head at the lower operating elevation.                                                                                                                           |
+| `scenario_net_head_max_m`                 | Derived head at the upper operating elevation.                                                                                                                           |
+| `efficiency`                              | Existing constant efficiency, stored as a fraction.                                                                                                                      |
 
 ## Data still missing
 
@@ -67,9 +67,9 @@ CSV values are numeric snapshots of the formulas above. Derived decimal values a
 
 Original source CSVs are preserved. Relative paths below are from the repository root. SHA-256 hashes identify the inputs at the time the supplement was prepared; the environment configuration has subsequently gained the head-model selection above without changing the elevation bounds or efficiency used to derive the CSV.
 
-| Input | SHA-256 |
-| --- | --- |
-| `data/cascade_reservoir_new/reservoir_parameters.csv` | `095a9ff1a0486ab716b069895370120e40304a72d06ff0c81d50e301104a528c` |
-| `data/cascade_reservoir_new/reservoir_stage_storage.csv` | `86f1ba09cee090002bc349a8d97377c76a94c1a782f5c589d2e2d0bea0411988` |
+| Input                                                      | SHA-256                                                            |
+| ---------------------------------------------------------- | ------------------------------------------------------------------ |
+| `data/cascade_reservoir_new/reservoir_parameters.csv`      | `095a9ff1a0486ab716b069895370120e40304a72d06ff0c81d50e301104a528c` |
+| `data/cascade_reservoir_new/reservoir_stage_storage.csv`   | `86f1ba09cee090002bc349a8d97377c76a94c1a782f5c589d2e2d0bea0411988` |
 | `data/cascade_reservoir_new/initial_storage_1965_2024.csv` | `6b5feb8b7a5f77992ff0a7e5a2d046631203f28e1378b81b7222613b8304fe64` |
-| `harl/configs/envs_cfgs/cascade_reservoir.yaml` | `d7ff9afe573ae403c648f3b05bc474aa51174b5dbf54cf20fa2172f7d4f909f7` |
+| `harl/configs/envs_cfgs/cascade_reservoir.yaml`            | `d7ff9afe573ae403c648f3b05bc474aa51174b5dbf54cf20fa2172f7d4f909f7` |
